@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#05060F" />
+<title>Rytme</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><text y=%2220%22 font-size=%2220%22>⭐</text></svg>" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.2.0",
+    "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react"
+  }
+}
+</script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body, #root { height: 100%; margin: 0; background: #05060F; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  Plus, Check, Trash2, X, Pencil, ChevronDown, Volume2, VolumeX,
+  RotateCcw, Clock, SkipForward, Pause, Play, Share2, Orbit,
+  Sparkles, ListChecks, Telescope, ArrowRight, Star, Rocket,
+} from "lucide-react";
+
+// Local storage shim standing in for the Claude-artifact-only window.storage API
+const storage = {
+  async get(key) {
+    const v = localStorage.getItem(key);
+    return v !== null ? { key, value: v } : null;
+  },
+  async set(key, value) {
+    localStorage.setItem(key, value);
+    return { key, value };
+  },
+};
+
+
+const BG = "#05060F";
+const CARD = "#141A33";
+const PURPLE = "#8C6FE8";
+const PURPLE_DARK = "#4B3F94";
+const PURPLE_SOFT = "#232A4D";
+const ORANGE = "#F4C868";
+const TEXT = "#F3F1FF";
+const MUTED = "#8890B5";
+const CHIP_OFF = "#1C2140";
+const NEBULA = "linear-gradient(135deg, #8C6FE8 0%, #4B6FE0 55%, #2E4FA8 100%)";
+const SPACE_GRADIENT = "linear-gradient(180deg, #241A55 0%, #05060F 100%)";
+
+const DAY_CODES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+const DAY_LABELS = { SU: "Søn", MO: "Man", TU: "Tir", WE: "Ons", TH: "Tor", FR: "Fre", SA: "Lør" };
+const WEEKDAY_FULL = ["Søndag", "Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag"];
+
+function todayKey(offset = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() - offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function fmtHM(date) {
+  return `${String(date.getHours()).padStart(2, "0")}.${String(date.getMinutes()).padStart(2, "0")}`;
+}
+function fmtMinSec(totalSeconds) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = Math.floor(totalSeconds % 60);
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+function uid() {
+  return Math.random().toString(36).slice(2, 9);
+}
+function totalSeconds(routine) {
+  return routine.steps.reduce((sum, s) => sum + s.seconds, 0);
+}
+function isDueToday(routine) {
+  if (routine.flexible) return true;
+  const code = DAY_CODES[new Date().getDay()];
+  return routine.days.includes(code);
+}
+
+const DEFAULT_ROUTINES = [
+  {
+    id: "morgen",
+    name: "Morgenrutine",
+    flexible: false,
+    days: ["MO", "TU", "WE", "TH", "FR", "SA", "SU"],
+    reminderTime: "07:00",
+    speakSteps: false,
+    steps: [
+      { id: uid(), emoji: "💧", text: "Drik et glas vand", seconds: 60 },
+      { id: uid(), emoji: "🛏️", text: "Red sengen", seconds: 120 },
+      { id: uid(), emoji: "🧘", text: "5 minutters stræk", seconds: 300 },
+    ],
+  },
+  {
+    id: "aften",
+    name: "Aftenrutine",
+    flexible: false,
+    days: ["MO", "TU", "WE", "TH", "FR", "SA", "SU"],
+    reminderTime: "21:00",
+    speakSteps: false,
+    steps: [
+      { id: uid(), emoji: "🧦", text: "Læg tøj frem til i morgen", seconds: 300 },
+      { id: uid(), emoji: "🦷", text: "Tandtråd", seconds: 300 },
+      { id: uid(), emoji: "🪥", text: "Børst tænder", seconds: 180 },
+    ],
+  },
+];
+
+function Rytme() {
+  const [routines, setRoutines] = useState(DEFAULT_ROUTINES);
+  const [completions, setCompletions] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState("home"); // home | edit | overview | timer | complete | insights
+  const [homeTab, setHomeTab] = useState("scheduled"); // scheduled | flexible
+  const [showCompletedToday, setShowCompletedToday] = useState(false);
+  const [activeId, setActiveId] = useState(null);
+  const [draft, setDraft] = useState(null);
+  const [lastCompletionSummary, setLastCompletionSummary] = useState(null);
+
+  // timer state
+  const [queue, setQueue] = useState([]);
+  const [stepIndex, setStepIndex] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+  const [targets, setTargets] = useState({}); // stepId -> seconds (adjustable today)
+  const [doneToday, setDoneToday] = useState([]);
+  const [actuals, setActuals] = useState({});
+  const [paused, setPaused] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const intervalRef = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = await storage.get("rytme-data-v2", false);
+        if (result?.value) {
+          const parsed = JSON.parse(result.value);
+          if (parsed.routines?.length) setRoutines(parsed.routines);
+          if (parsed.completions) setCompletions(parsed.completions);
+        }
+      } catch (e) {
+        // fresh start
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const persist = useCallback(async (nextRoutines, nextCompletions) => {
+    try {
+      await storage.set(
+        "rytme-data-v2",
+        JSON.stringify({ routines: nextRoutines, completions: nextCompletions }),
+        false
+      );
+    } catch (e) {
+      // best effort
+    }
+  }, []);
+
+  const saveRoutines = (next) => { setRoutines(next); persist(next, completions); };
+  const saveCompletions = (next) => { setCompletions(next); persist(routines, next); };
+
+  useEffect(() => {
+    if (view === "timer" && !paused) {
+      intervalRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
+      return () => clearInterval(intervalRef.current);
+    }
+    clearInterval(intervalRef.current);
+  }, [view, paused, stepIndex]);
+
+  const speak = (text) => {
+    if (!routines.find((r) => r.id === activeId)?.speakSteps) return;
+    try {
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = "da-DK";
+      window.speechSynthesis.speak(u);
+    } catch (e) {}
+  };
+
+  const streakFor = (routineId) => {
+    const routine = routines.find((r) => r.id === routineId);
+    if (!routine || routine.steps.length === 0) return 0;
+    const stepIds = routine.steps.map((s) => s.id);
+    let streak = 0;
+    let offset = 0;
+    const todayDone = completions[todayKey(0)]?.[routineId]?.stepIds || [];
+    const todayComplete = stepIds.every((id) => todayDone.includes(id));
+    if (!todayComplete) offset = 1;
+    while (offset < 400) {
+      const rec = completions[todayKey(offset)]?.[routineId]?.stepIds || [];
+      if (!stepIds.every((id) => rec.includes(id))) break;
+      streak += 1;
+      offset += 1;
+    }
+    return streak;
+  };
+
+  const last7 = (routineId) => {
+    const routine = routines.find((r) => r.id === routineId);
+    const stepIds = routine?.steps.map((s) => s.id) || [];
+    const out = [];
+    for (let i = 6; i >= 0; i--) {
+      const rec = completions[todayKey(i)]?.[routineId]?.stepIds || [];
+      const complete = stepIds.length > 0 && stepIds.every((id) => rec.includes(id));
+      out.push({ offset: i, complete });
+    }
+    return out;
+  };
+
+  // ---------- navigation helpers ----------
+  const openOverview = (id) => { setActiveId(id); setView("overview"); };
+  const openEdit = (id) => {
+    if (id) {
+      const r = routines.find((x) => x.id === id);
+      setDraft(JSON.parse(JSON.stringify(r)));
+      setActiveId(id);
+    } else {
+      setDraft({
+        id: null, name: "", flexible: false,
+        days: ["MO", "TU", "WE", "TH", "FR", "SA", "SU"],
+        reminderTime: "07:00", speakSteps: false, steps: [],
+      });
+      setActiveId(null);
+    }
+    setView("edit");
+  };
+  const backHome = () => { setView("home"); setActiveId(null); };
+
+  const saveDraft = () => {
+    if (!draft.name.trim() || draft.steps.length === 0) return;
+    let next;
+    if (draft.id) {
+      next = routines.map((r) => (r.id === draft.id ? draft : r));
+    } else {
+      const id = `${draft.name.toLowerCase().replace(/\s+/g, "-")}-${uid()}`;
+      next = [...routines, { ...draft, id }];
+      setActiveId(id);
+    }
+    saveRoutines(next);
+    setView("overview");
+  };
+
+  const deleteRoutine = () => {
+    if (!draft?.id) return;
+    saveRoutines(routines.filter((r) => r.id !== draft.id));
+    backHome();
+  };
+
+  const startTimer = (id) => {
+    const routine = routines.find((r) => r.id === id);
+    if (!routine || routine.steps.length === 0) return;
+    setActiveId(id);
+    setQueue(routine.steps.map((s) => s.id));
+    const t = {};
+    routine.steps.forEach((s) => (t[s.id] = s.seconds));
+    setTargets(t);
+    setStepIndex(0);
+    setElapsed(0);
+    setDoneToday([]);
+    setActuals({});
+    setPaused(false);
+    setView("timer");
+    speak(routine.steps[0].text);
+  };
+
+  const currentRoutine = routines.find((r) => r.id === activeId);
+  const stepById = (id) => currentRoutine?.steps.find((s) => s.id === id);
+
+  const advance = (completedFlag) => {
+    const curId = queue[stepIndex];
+    if (completedFlag) {
+      setDoneToday((d) => [...d, curId]);
+      setActuals((a) => ({ ...a, [curId]: elapsed }));
+    }
+    if (stepIndex + 1 >= queue.length) {
+      finishRoutine(completedFlag ? [...doneToday, curId] : doneToday, completedFlag ? { ...actuals, [curId]: elapsed } : actuals);
+    } else {
+      setStepIndex((i) => i + 1);
+      setElapsed(0);
+      speak(stepById(queue[stepIndex + 1])?.text || "");
+    }
+  };
+
+  const finishRoutine = (finalDone, finalActuals) => {
+    const key = todayKey(0);
+    const nextCompletions = {
+      ...completions,
+      [key]: { ...(completions[key] || {}), [activeId]: { stepIds: finalDone, actual: finalActuals } },
+    };
+    saveCompletions(nextCompletions);
+    const streak = (() => {
+      const stepIds = currentRoutine.steps.map((s) => s.id);
+      let s = 0, off = 0;
+      const complete0 = stepIds.every((id) => finalDone.includes(id));
+      if (!complete0) { setLastCompletionSummary({ streak: 0, done: finalDone, actuals: finalActuals }); setView("complete"); return; }
+      off = 0;
+      while (off < 400) {
+        const rec = off === 0 ? finalDone : (nextCompletions[todayKey(off)]?.[activeId]?.stepIds || []);
+        if (!stepIds.every((id) => rec.includes(id))) break;
+        s += 1; off += 1;
+      }
+      setLastCompletionSummary({ streak: s, done: finalDone, actuals: finalActuals });
+    })();
+    setView("complete");
+  };
+
+  const resetTimer = () => setElapsed(0);
+  const addOneMin = () => {
+    const curId = queue[stepIndex];
+    setTargets((t) => ({ ...t, [curId]: (t[curId] || 0) + 60 }));
+  };
+  const reschedule = () => {
+    if (stepIndex + 1 < queue.length) {
+      const next = [...queue];
+      [next[stepIndex], next[stepIndex + 1]] = [next[stepIndex + 1], next[stepIndex]];
+      setQueue(next);
+      setElapsed(0);
+    }
+  };
+  const doTaskLater = () => {
+    if (stepIndex + 1 < queue.length) {
+      const next = [...queue];
+      const [cur] = next.splice(stepIndex, 1);
+      next.push(cur);
+      setQueue(next);
+      setElapsed(0);
+    }
+  };
+  const backToPrevious = () => {
+    if (stepIndex === 0) return;
+    const prevId = queue[stepIndex - 1];
+    setDoneToday((d) => d.filter((id) => id !== prevId));
+    setStepIndex((i) => i - 1);
+    setElapsed(0);
+  };
+
+  const shareRoutine = async (routine) => {
+    const text = `${routine.name}:\n${routine.steps.map((s, i) => `${i + 1}. ${s.emoji} ${s.text} (${Math.round(s.seconds / 60)} min)`).join("\n")}`;
+    try {
+      if (navigator.share) await navigator.share({ title: routine.name, text });
+      else await navigator.clipboard.writeText(text);
+    } catch (e) {}
+  };
+
+  if (loading) {
+    return (
+      <div style={{ background: BG, minHeight: "100vh" }} className="flex items-center justify-center">
+        <p style={{ color: MUTED, fontFamily: "Inter, sans-serif" }}>Henter dine rutiner…</p>
+      </div>
+    );
+  }
+
+  const fontStyle = (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
+      .f-display { font-family: 'Cinzel', serif; letter-spacing: 0.01em; }
+      .f-body { font-family: 'Inter', sans-serif; }
+      .font-mono { font-family: 'Space Mono', monospace !important; }
+      input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.7); }
+      @keyframes fall { 0% { transform: translateY(-10vh) rotate(0deg); opacity: 1; } 100% { transform: translateY(110vh) rotate(360deg); opacity: 0.9; } }
+      .confetti-piece { position: absolute; top: 0; animation: fall linear forwards; }
+      @keyframes popIn { 0% { transform: scale(0.85); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+      .pop { animation: popIn 0.18s ease-out; }
+      .starfield {
+        position: fixed; inset: 0; pointer-events: none; z-index: 0;
+        background-image:
+          radial-gradient(1.5px 1.5px at 20% 30%, rgba(255,255,255,0.9), transparent),
+          radial-gradient(1px 1px at 60% 70%, rgba(255,255,255,0.7), transparent),
+          radial-gradient(1.5px 1.5px at 80% 20%, rgba(255,255,255,0.8), transparent),
+          radial-gradient(1px 1px at 35% 85%, rgba(255,255,255,0.6), transparent),
+          radial-gradient(1.5px 1.5px at 90% 60%, rgba(255,255,255,0.7), transparent),
+          radial-gradient(1px 1px at 10% 65%, rgba(255,255,255,0.5), transparent),
+          radial-gradient(1.5px 1.5px at 50% 10%, rgba(255,255,255,0.8), transparent);
+        background-repeat: repeat;
+        background-size: 220px 220px;
+        animation: twinkle 5s ease-in-out infinite alternate;
+      }
+      @keyframes twinkle { 0% { opacity: 0.6; } 100% { opacity: 1; } }
+    `}</style>
+  );
+
+  // ---------------- HOME ----------------
+  const renderHome = () => {
+    const due = routines.filter((r) => (homeTab === "scheduled" ? !r.flexible : r.flexible) && isDueToday(r));
+    const key = todayKey(0);
+    const pending = due.filter((r) => {
+      const stepIds = r.steps.map((s) => s.id);
+      const done = completions[key]?.[r.id]?.stepIds || [];
+      return !(stepIds.length > 0 && stepIds.every((id) => done.includes(id)));
+    });
+    const finished = due.filter((r) => !pending.includes(r));
+
+    return (
+      <div className="px-5 pt-8 pb-24">
+        <div className="flex items-center justify-between mb-5">
+          <h1 className="f-display text-3xl" style={{ color: TEXT, fontWeight: 700 }}>Rytme</h1>
+        </div>
+
+        <div className="flex gap-2 mb-6">
+          {[
+            { id: "scheduled", label: "Planlagt", Icon: Orbit },
+            { id: "flexible", label: "Fleksibel", Icon: Sparkles },
+          ].map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              onClick={() => setHomeTab(id)}
+              className="flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl text-sm font-medium focus:outline-none focus-visible:ring-2"
+              style={{ background: homeTab === id ? "#38354A" : "transparent", color: homeTab === id ? TEXT : MUTED, border: homeTab === id ? "none" : `1px solid ${CHIP_OFF}` }}
+            >
+              {label} <Icon size={15} />
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between mb-4">
+          <span className="text-sm font-medium" style={{ color: MUTED }}>Rutiner</span>
+          <span className="text-sm font-medium" style={{ color: TEXT }}>{WEEKDAY_FULL[new Date().getDay()]}</span>
+        </div>
+
+        {pending.length === 0 && (
+          <div className="rounded-3xl p-8 flex flex-col items-center text-center mb-6" style={{ background: CARD }}>
+            <div className="w-14 h-14 rounded-full flex items-center justify-center mb-4" style={{ background: PURPLE_SOFT }}>
+              <Check size={26} style={{ color: PURPLE }} />
+            </div>
+            <p className="f-body text-sm" style={{ color: TEXT }}>
+              {due.length === 0 ? "Ingen rutiner planlagt i dag." : "Du har gennemført alle rutiner for i dag!"}
+            </p>
+          </div>
+        )}
+
+        <div className="flex flex-col gap-4">
+          {pending.map((r) => {
+            const now = new Date();
+            const finish = new Date(now.getTime() + totalSeconds(r) * 1000);
+            const doneIds = completions[key]?.[r.id]?.stepIds || [];
+            const nextStep = r.steps.find((s) => !doneIds.includes(s.id)) || r.steps[0];
+            return (
+              <div key={r.id} className="rounded-3xl p-5" style={{ background: NEBULA, boxShadow: "0 0 30px rgba(140,111,232,0.25)" }}>
+                <button onClick={() => openOverview(r.id)} className="w-full text-left">
+                  <div className="flex items-center gap-2 text-sm mb-2" style={{ color: "#F0EEFA" }}>
+                    <span className="font-mono">{fmtHM(now)}</span>
+                    <ArrowRight size={13} />
+                    <span className="font-mono">{fmtHM(finish)}</span>
+                  </div>
+                  <h2 className="f-display text-2xl mb-3" style={{ color: "#fff", fontWeight: 700 }}>{r.name}</h2>
+                  <div className="flex items-center gap-2 text-sm" style={{ color: "#EDEBFA" }}>
+                    <span>{nextStep.emoji}</span>
+                    <span className="flex-1">{nextStep.text}</span>
+                    <span className="font-mono">{r.reminderTime.replace(":", ".")}</span>
+                  </div>
+                </button>
+                <button
+                  onClick={() => startTimer(r.id)}
+                  className="w-full mt-4 py-3 rounded-full text-sm font-bold tracking-wide flex items-center justify-center gap-2"
+                  style={{ background: PURPLE_DARK, color: "#fff" }}
+                >
+                  <Rocket size={14} /> QUICK-START
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {finished.length > 0 && (
+          <div className="mt-6">
+            <button onClick={() => setShowCompletedToday((s) => !s)} className="flex items-center gap-1 text-sm" style={{ color: MUTED }}>
+              Gennemført i dag <ChevronDown size={15} style={{ transform: showCompletedToday ? "rotate(180deg)" : "none" }} />
+            </button>
+            {showCompletedToday && (
+              <div className="flex flex-col gap-2 mt-3">
+                {finished.map((r) => (
+                  <button key={r.id} onClick={() => openOverview(r.id)} className="rounded-2xl px-4 py-3 flex items-center justify-between" style={{ background: CARD }}>
+                    <span className="text-sm" style={{ color: TEXT }}>{r.name}</span>
+                    <Check size={16} style={{ color: PURPLE }} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------------- EDIT ----------------
+  const renderEdit = () => {
+    if (!draft) return null;
+    const total = draft.steps.reduce((s, x) => s + x.seconds, 0);
+    const hh = Math.floor(total / 3600);
+    const mm = Math.floor((total % 3600) / 60);
+    const update = (patch) => setDraft((d) => ({ ...d, ...patch }));
+    const updateStep = (id, patch) => update({ steps: draft.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) });
+    const removeStep = (id) => update({ steps: draft.steps.filter((s) => s.id !== id) });
+    const addStep = () => update({ steps: [...draft.steps, { id: uid(), emoji: "📋", text: "", seconds: 300 }] });
+
+    return (
+      <div className="px-5 pt-8 pb-24">
+        <div className="flex items-center justify-between mb-6">
+          {draft.id ? (
+            <button onClick={deleteRoutine} aria-label="Slet rutine"><Trash2 size={20} style={{ color: "#D96F6F" }} /></button>
+          ) : <span />}
+          <h1 className="f-display text-2xl" style={{ color: TEXT, fontWeight: 700 }}>{draft.id ? "Rediger" : "Ny rutine"}</h1>
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-mono" style={{ color: PURPLE }}>{hh}:{String(mm).padStart(2, "0")}h i alt</span>
+            <button onClick={() => (draft.id ? setView("overview") : backHome())} aria-label="Luk"><X size={20} style={{ color: MUTED }} /></button>
+          </div>
+        </div>
+
+        <label className="text-xs uppercase tracking-wide" style={{ color: MUTED }}>Navn</label>
+        <input
+          value={draft.name}
+          maxLength={35}
+          onChange={(e) => update({ name: e.target.value })}
+          placeholder="F.eks. Aftenrutine"
+          className="w-full mt-2 mb-1 px-4 py-3 rounded-2xl text-sm outline-none"
+          style={{ background: CARD, color: TEXT, border: `1px solid ${CHIP_OFF}` }}
+        />
+        <p className="text-xs text-right mb-6" style={{ color: MUTED }}>{draft.name.length}/35</p>
+
+        <label className="text-xs uppercase tracking-wide" style={{ color: MUTED }}>Dage</label>
+        <div className="flex flex-wrap gap-2 mt-2 mb-4">
+          {DAY_CODES.map((code) => {
+            const on = draft.days.includes(code);
+            return (
+              <button
+                key={code}
+                disabled={draft.flexible}
+                onClick={() => update({ days: on ? draft.days.filter((d) => d !== code) : [...draft.days, code] })}
+                className="px-3 py-2 rounded-full text-xs font-medium flex items-center gap-1"
+                style={{ background: on && !draft.flexible ? PURPLE : CHIP_OFF, color: on && !draft.flexible ? "#fff" : MUTED, opacity: draft.flexible ? 0.4 : 1 }}
+              >
+                {on && !draft.flexible && <Check size={11} />} {DAY_LABELS[code]}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center justify-between mb-6 px-1">
+          <span className="text-sm" style={{ color: TEXT }}>Fleksibel (ingen faste dage)</span>
+          <button
+            onClick={() => update({ flexible: !draft.flexible })}
+            className="w-11 h-6 rounded-full flex items-center px-0.5"
+            style={{ background: draft.flexible ? PURPLE : CHIP_OFF, justifyContent: draft.flexible ? "flex-end" : "flex-start" }}
+          >
+            <span className="w-5 h-5 rounded-full bg-white block" />
+          </button>
+        </div>
+
+        <label className="text-xs uppercase tracking-wide" style={{ color: MUTED }}>Påmindelsestidspunkt</label>
+        <input
+          type="time"
+          value={draft.reminderTime}
+          onChange={(e) => update({ reminderTime: e.target.value })}
+          className="w-full mt-2 mb-6 px-4 py-3 rounded-2xl text-sm outline-none"
+          style={{ background: CARD, color: TEXT, border: `1px solid ${CHIP_OFF}` }}
+        />
+
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-sm font-medium" style={{ color: TEXT }}>{draft.steps.length} trin</span>
+        </div>
+        <div className="flex flex-col gap-2 mb-3">
+          {draft.steps.map((s) => (
+            <div key={s.id} className="flex items-center gap-2 rounded-2xl px-3 py-2" style={{ background: CARD }}>
+              <input value={s.emoji} onChange={(e) => updateStep(s.id, { emoji: e.target.value })} className="w-9 text-center text-lg bg-transparent outline-none" />
+              <input value={s.text} onChange={(e) => updateStep(s.id, { text: e.target.value })} placeholder="Trin..." className="flex-1 bg-transparent outline-none text-sm" style={{ color: TEXT }} />
+              <input
+                type="number" min={1} value={Math.round(s.seconds / 60)}
+                onChange={(e) => updateStep(s.id, { seconds: Math.max(1, Number(e.target.value)) * 60 })}
+                className="w-12 bg-transparent outline-none text-sm text-right"
+                style={{ color: MUTED }}
+              />
+              <span className="text-xs" style={{ color: MUTED }}>min</span>
+              <button onClick={() => removeStep(s.id)}><Trash2 size={15} style={{ color: MUTED }} /></button>
+            </div>
+          ))}
+        </div>
+        <button onClick={addStep} className="w-full py-3 rounded-2xl text-sm flex items-center justify-center gap-2 mb-8" style={{ border: `1px dashed ${CHIP_OFF}`, color: MUTED }}>
+          <Plus size={15} /> Tilføj trin
+        </button>
+
+        <button
+          onClick={saveDraft}
+          disabled={!draft.name.trim() || draft.steps.length === 0}
+          className="w-full py-4 rounded-full text-sm font-bold"
+          style={{ background: PURPLE, color: "#fff", opacity: !draft.name.trim() || draft.steps.length === 0 ? 0.5 : 1 }}
+        >
+          GEM ÆNDRINGER
+        </button>
+      </div>
+    );
+  };
+
+  // ---------------- OVERVIEW ----------------
+  const renderOverview = () => {
+    const r = currentRoutine;
+    if (!r) return null;
+    const now = new Date();
+    const finish = new Date(now.getTime() + totalSeconds(r) * 1000);
+    const key = todayKey(0);
+    const doneIds = completions[key]?.[r.id]?.stepIds || [];
+    return (
+      <div className="px-5 pt-8 pb-24">
+        <div className="flex items-center justify-between mb-1">
+          <h1 className="f-display text-3xl" style={{ color: TEXT, fontWeight: 700 }}>{r.name}</h1>
+          <button onClick={() => openEdit(r.id)}><Pencil size={19} style={{ color: MUTED }} /></button>
+        </div>
+        <p className="text-sm mb-1" style={{ color: MUTED }}>Hvis du starter nu</p>
+        <p className="font-mono text-2xl mb-6" style={{ color: PURPLE }}>{fmtHM(now)} til {fmtHM(finish)}</p>
+
+        <p className="text-sm mb-2" style={{ color: MUTED }}>Seneste 7 dage</p>
+        <div className="flex gap-2 mb-6">
+          {last7(r.id).map((d, i) => (
+            <div
+              key={i}
+              className="flex-1 aspect-square rounded-full flex items-center justify-center"
+              style={{
+                background: d.complete ? ORANGE : "transparent",
+                border: d.offset === 0 && !d.complete ? `2px solid ${ORANGE}` : `1px solid ${CHIP_OFF}`,
+                boxShadow: d.complete ? `0 0 10px ${ORANGE}` : "none",
+              }}
+            >
+              {d.complete && <Star size={11} style={{ color: "#241A55" }} fill="#241A55" />}
+            </div>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between mb-6 px-1">
+          <span className="text-sm" style={{ color: TEXT }}>Læs trin højt</span>
+          <button
+            onClick={() => saveRoutines(routines.map((x) => (x.id === r.id ? { ...x, speakSteps: !x.speakSteps } : x)))}
+            className="w-11 h-6 rounded-full flex items-center px-0.5"
+            style={{ background: r.speakSteps ? PURPLE : CHIP_OFF, justifyContent: r.speakSteps ? "flex-end" : "flex-start" }}
+          >
+            <span className="w-5 h-5 rounded-full bg-white block" />
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between mb-3">
+          <span className="text-sm font-medium" style={{ color: TEXT }}>{r.steps.length} trin</span>
+          <button onClick={() => shareRoutine(r)} className="flex items-center gap-1 text-xs" style={{ color: MUTED }}>
+            Del rutine <Share2 size={13} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-2 mb-8">
+          {r.steps.map((s) => (
+            <div key={s.id} className="flex items-center gap-3 rounded-2xl px-4 py-3" style={{ background: CARD }}>
+              <span className="text-lg">{s.emoji}</span>
+              <span className="flex-1 text-sm" style={{ color: TEXT }}>{s.text}</span>
+              <span className="text-xs font-mono" style={{ color: MUTED }}>{Math.round(s.seconds / 60)} min</span>
+              <span className="w-5 h-5 rounded-full" style={{ border: `2px solid ${doneIds.includes(s.id) ? PURPLE : CHIP_OFF}`, background: doneIds.includes(s.id) ? PURPLE : "transparent" }} />
+            </div>
+          ))}
+        </div>
+
+        <button onClick={() => startTimer(r.id)} className="w-full py-4 rounded-full text-sm font-bold" style={{ background: PURPLE, color: "#fff" }}>
+          START TIMER-TILSTAND
+        </button>
+        <button onClick={backHome} className="w-full mt-4 text-sm" style={{ color: MUTED }}>Luk</button>
+      </div>
+    );
+  };
+
+  // ---------------- TIMER ----------------
+  const renderTimer = () => {
+    const r = currentRoutine;
+    if (!r || queue.length === 0) return null;
+    const curId = queue[stepIndex];
+    const cur = stepById(curId);
+    const target = targets[curId] || cur.seconds;
+    const pct = Math.min(1, elapsed / target);
+    const stepsLeft = queue.length - stepIndex;
+    const prevId = stepIndex > 0 ? queue[stepIndex - 1] : null;
+    const prev = prevId ? stepById(prevId) : null;
+    const nextId = stepIndex + 1 < queue.length ? queue[stepIndex + 1] : null;
+    const next = nextId ? stepById(nextId) : null;
+    const remainingSeconds = queue.slice(stepIndex).reduce((sum, id) => sum + (targets[id] || stepById(id).seconds), 0) - elapsed;
+    const finishAt = new Date(Date.now() + Math.max(0, remainingSeconds) * 1000);
+
+    return (
+      <div className="px-5 pt-8 pb-8 min-h-screen flex flex-col">
+        <div className="flex items-center gap-2 mb-6">
+          <button onClick={() => setMuted((m) => !m)}>{muted ? <VolumeX size={18} style={{ color: MUTED }} /> : <Volume2 size={18} style={{ color: MUTED }} />}</button>
+          <div className="flex-1 flex gap-1.5">
+            {queue.map((id, i) => (
+              <span
+                key={id}
+                className="flex-1 h-2 rounded-full"
+                style={{
+                  background: i < stepIndex ? PURPLE : i === stepIndex ? ORANGE : CHIP_OFF,
+                  boxShadow: i === stepIndex ? `0 0 8px ${ORANGE}` : "none",
+                }}
+              />
+            ))}
+          </div>
+          <span className="text-xs font-medium whitespace-nowrap" style={{ color: MUTED }}>{stepsLeft} trin tilbage</span>
+          <button onClick={backHome}><X size={20} style={{ color: MUTED }} /></button>
+        </div>
+
+        {prev && (
+          <div className="flex items-center justify-between mb-3 text-sm">
+            <div className="flex items-center gap-2" style={{ color: MUTED }}>
+              <Check size={14} style={{ color: PURPLE }} />
+              <span>Forrige trin: <span style={{ color: TEXT }}>{prev.text}</span></span>
+            </div>
+            <button onClick={backToPrevious} className="text-xs underline" style={{ color: PURPLE }}>Tilbage</button>
+          </div>
+        )}
+
+        <div className="rounded-3xl p-6 mb-4 pop" style={{ background: NEBULA, boxShadow: "0 0 40px rgba(140,111,232,0.3)" }} key={curId}>
+          <div className="flex items-start justify-between mb-6">
+            <span className="text-sm" style={{ color: "#EDEBFA" }}>{Math.round(target / 60)} min planlagt</span>
+            <div className="w-14 h-14 rounded-2xl flex items-center justify-center text-2xl" style={{ background: "rgba(255,255,255,0.18)" }}>{cur.emoji}</div>
+          </div>
+          <p className="font-mono text-3xl mb-2" style={{ color: elapsed > target ? "#FFD1A9" : ORANGE }}>{fmtMinSec(elapsed)} min.</p>
+          <h2 className="f-display text-2xl mb-6" style={{ color: "#fff", fontWeight: 700 }}>{cur.text}</h2>
+
+          <div className="h-3 rounded-full mb-5" style={{ background: "rgba(255,255,255,0.25)" }}>
+            <div className="h-3 rounded-full" style={{ width: `${pct * 100}%`, background: "#fff" }} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={reschedule} className="flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-medium" style={{ background: "rgba(255,255,255,0.15)", color: "#fff" }}>
+              <ListChecks size={14} /> Omarranger
+            </button>
+            <button onClick={resetTimer} className="flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-medium" style={{ background: "rgba(255,255,255,0.15)", color: "#fff" }}>
+              <RotateCcw size={14} /> Nulstil
+            </button>
+            <button onClick={addOneMin} className="flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-medium" style={{ background: "rgba(255,255,255,0.15)", color: "#fff" }}>
+              <Clock size={14} /> +1 min.
+            </button>
+            <button onClick={doTaskLater} className="flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-medium" style={{ background: "rgba(255,255,255,0.15)", color: "#fff" }}>
+              <SkipForward size={14} /> Gør senere
+            </button>
+          </div>
+        </div>
+
+        {next && (
+          <div className="rounded-2xl px-4 py-3 mb-4" style={{ background: CARD }}>
+            <p className="text-xs mb-1" style={{ color: MUTED }}>Næste trin</p>
+            <p className="text-sm" style={{ color: TEXT }}>{next.emoji} {next.text}</p>
+          </div>
+        )}
+
+        <p className="text-center text-xs mb-6" style={{ color: MUTED }}>
+          Rutinen er færdig ca. <span className="font-mono" style={{ color: TEXT }}>{fmtHM(finishAt)}</span>
+        </p>
+
+        <div className="mt-auto flex items-center justify-between px-4">
+          <button onClick={() => setPaused((p) => !p)} className="flex flex-col items-center gap-1">
+            <span className="w-14 h-14 rounded-full flex items-center justify-center" style={{ border: `2px solid ${CHIP_OFF}` }}>
+              {paused ? <Play size={20} style={{ color: TEXT }} /> : <Pause size={20} style={{ color: TEXT }} />}
+            </span>
+            <span className="text-xs" style={{ color: MUTED }}>{paused ? "FORTSÆT" : "PAUSE"}</span>
+          </button>
+          <button onClick={() => advance(true)} className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: PURPLE }}>
+            <Check size={30} style={{ color: "#fff" }} />
+          </button>
+          <button onClick={() => advance(false)} className="flex flex-col items-center gap-1">
+            <span className="w-14 h-14 rounded-full flex items-center justify-center" style={{ border: `2px solid ${CHIP_OFF}` }}>
+              <ArrowRight size={20} style={{ color: TEXT }} />
+            </span>
+            <span className="text-xs" style={{ color: MUTED }}>SPRING OVER</span>
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // ---------------- COMPLETE ----------------
+  const renderComplete = () => {
+    const r = currentRoutine;
+    if (!r || !lastCompletionSummary) return null;
+    const { streak, actuals: finalActuals } = lastCompletionSummary;
+    const confetti = Array.from({ length: 40 }).map((_, i) => ({
+      left: Math.random() * 100,
+      color: [ORANGE, "#fff", PURPLE, "#B9C7FF", ORANGE][i % 5],
+      delay: Math.random() * 0.6,
+      duration: 2.4 + Math.random() * 1.6,
+      size: 3 + Math.random() * 4,
+    }));
+    const suggestions = r.steps.filter((s) => finalActuals[s.id] != null && Math.abs(finalActuals[s.id] - s.seconds) >= 30);
+
+    return (
+      <div className="relative min-h-screen overflow-hidden px-5 pt-10 pb-10 flex flex-col" style={{ background: SPACE_GRADIENT }}>
+        {confetti.map((c, i) => (
+          <span key={i} className="confetti-piece" style={{ left: `${c.left}%`, width: c.size, height: c.size, background: c.color, animationDelay: `${c.delay}s`, animationDuration: `${c.duration}s`, borderRadius: "50%", boxShadow: "0 0 4px rgba(255,255,255,0.8)" }} />
+        ))}
+        <div className="relative z-10 flex-1">
+          <div className="w-16 h-16 rounded-full flex items-center justify-center mb-6" style={{ background: "rgba(255,255,255,0.2)" }}>
+            <Check size={30} style={{ color: "#fff" }} />
+          </div>
+          <h1 className="f-display text-4xl mb-3" style={{ color: "#fff", fontWeight: 700 }}>Flot klaret!</h1>
+          <p className="text-sm mb-8" style={{ color: "#F0EEFA" }}>
+            {streak > 0
+              ? <>Du har nu gennemført rutinen <b>{streak} {streak === 1 ? "dag" : "dage"}</b> i træk.</>
+              : "Rutinen er gennemført for i dag."}
+          </p>
+
+          {streak > 0 && (
+            <div className="flex items-center gap-2 mb-8 px-4 py-3 rounded-2xl w-fit" style={{ background: "rgba(255,255,255,0.15)" }}>
+              <Star size={16} style={{ color: ORANGE }} fill={ORANGE} />
+              <span className="text-sm font-medium" style={{ color: "#fff" }}>{streak} i træk</span>
+            </div>
+          )}
+
+          {suggestions.length > 0 && (
+            <>
+              <p className="text-sm font-medium mb-3" style={{ color: "#fff" }}>Forslag til varighed</p>
+              <div className="flex flex-col gap-2 mb-6">
+                {suggestions.map((s) => (
+                  <div key={s.id} className="rounded-2xl px-4 py-3" style={{ background: "rgba(255,255,255,0.12)" }}>
+                    <p className="text-sm mb-1" style={{ color: "#fff" }}>{s.emoji} {s.text}</p>
+                    <p className="text-xs mb-2" style={{ color: "#E4E1F5" }}>Planlagt: {Math.round(s.seconds / 60)} min. · I dag: {Math.round(finalActuals[s.id] / 60)} min.</p>
+                    <button
+                      onClick={() => saveRoutines(routines.map((x) => x.id === r.id ? { ...x, steps: x.steps.map((st) => st.id === s.id ? { ...st, seconds: finalActuals[s.id] } : st) } : x))}
+                      className="text-xs font-medium px-3 py-1.5 rounded-full"
+                      style={{ background: "#fff", color: PURPLE_DARK }}
+                    >
+                      Opdater til {Math.round(finalActuals[s.id] / 60)} min.
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+        <button onClick={backHome} className="relative z-10 w-full py-4 rounded-full text-sm font-bold" style={{ background: "#fff", color: PURPLE_DARK }}>
+          FÆRDIG
+        </button>
+      </div>
+    );
+  };
+
+  // ---------------- INSIGHTS ----------------
+  const renderInsights = () => (
+    <div className="px-5 pt-8 pb-24">
+      <h1 className="f-display text-3xl mb-6" style={{ color: TEXT, fontWeight: 700 }}>Indsigt</h1>
+      <div className="flex flex-col gap-3">
+        {routines.map((r) => {
+          const streak = streakFor(r.id);
+          const week = last7(r.id);
+          const rate = Math.round((week.filter((d) => d.complete).length / 7) * 100);
+          return (
+            <div key={r.id} className="rounded-2xl p-4" style={{ background: CARD }}>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium" style={{ color: TEXT }}>{r.name}</span>
+                <span className="flex items-center gap-1 text-xs" style={{ color: ORANGE }}><Star size={13} fill={ORANGE} /> {streak}</span>
+              </div>
+              <div className="flex gap-1.5">
+                {week.map((d, i) => (
+                  <div key={i} className="flex-1 h-6 rounded-full" style={{ background: d.complete ? ORANGE : CHIP_OFF, boxShadow: d.complete ? `0 0 6px ${ORANGE}` : "none" }} />
+                ))}
+              </div>
+              <p className="text-xs mt-2" style={{ color: MUTED }}>{rate}% gennemført seneste 7 dage</p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  const showBottomNav = view === "home" || view === "insights";
+
+  return (
+    <div style={{ background: SPACE_GRADIENT, minHeight: "100vh" }} className="f-body relative">
+      {fontStyle}
+      <div className="starfield" />
+      <div className="max-w-md mx-auto w-full relative" style={{ zIndex: 1 }}>
+        {view === "home" && renderHome()}
+        {view === "edit" && renderEdit()}
+        {view === "overview" && renderOverview()}
+        {view === "timer" && renderTimer()}
+        {view === "complete" && renderComplete()}
+        {view === "insights" && renderInsights()}
+
+        {showBottomNav && (
+          <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto flex items-center justify-around py-4 px-6" style={{ background: BG, borderTop: `1px solid ${CHIP_OFF}` }}>
+            <button onClick={() => setView("home")} className="flex flex-col items-center gap-1">
+              <Star size={20} style={{ color: view === "home" ? ORANGE : MUTED }} fill={view === "home" ? ORANGE : "none"} />
+              <span className="text-[10px]" style={{ color: view === "home" ? ORANGE : MUTED }}>Rutiner</span>
+            </button>
+            <button onClick={() => openEdit(null)} className="w-14 h-14 rounded-2xl flex items-center justify-center" style={{ background: NEBULA }}>
+              <Plus size={22} style={{ color: "#fff" }} />
+            </button>
+            <button onClick={() => setView("insights")} className="flex flex-col items-center gap-1">
+              <Telescope size={20} style={{ color: view === "insights" ? ORANGE : MUTED }} />
+              <span className="text-[10px]" style={{ color: view === "insights" ? ORANGE : MUTED }}>Indsigt</span>
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const root = createRoot(document.getElementById("root"));
+root.render(<Rytme />);
+</script>
+</body>
+</html>
