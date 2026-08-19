@@ -1,0 +1,20 @@
+{
+  "name": "Rytme",
+  "short_name": "Rytme",
+  "description": "Dine daglige rutiner, med et strejf af stjernehimmel.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "id": "./index.html",
+  "display": "standalone",
+  "display_override": ["fullscreen", "standalone"],
+  "background_color": "#05060F",
+  "theme_color": "#05060F",
+  "orientation": "portrait",
+  "lang": "da",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
